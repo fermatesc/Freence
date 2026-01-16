@@ -20,4 +20,4 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python source/daily_bot_script.py # Un script ligero que solo envíe el mensaje
+        run: python source/daily_bot.py # Un script ligero que solo envíe el mensaje
