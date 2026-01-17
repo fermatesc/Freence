@@ -1,16 +1,16 @@
 import os
-import requests
 import io
+import requests
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 from fpdf import FPDF
 from dotenv import load_dotenv
 import plotly.io as pio
+
 from finance_ingestor import FinanceEngine
+from daily_bot import get_ai_analysis
 
 load_dotenv()
 
@@ -198,10 +198,8 @@ if data is not None:
     if 'ai_cache' not in st.session_state:
         st.session_state.ai_cache = {}
 
-    if st.button("🤖 Generar Análisis IA para Informe PDF"):
+    if st.sidebar.button("🤖 Generar Análisis IA para Informe PDF"):
         with st.spinner("Analizando noticias de todos los activos..."):
-            from daily_bot_script import get_ai_analysis
-
             for t in tickers:
                 st.session_state.ai_cache[t] = get_ai_analysis(t, is_brief=True)
             st.success("Análisis completados. Ya puedes descargar el PDF.")
