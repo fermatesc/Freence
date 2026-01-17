@@ -100,6 +100,25 @@ def create_full_pdf(data, vol, corr, tickers, fig_main, fig_vol, fig_corr):
             pdf.cell(30, 7, str(row[col])[:8], border=1)
         pdf.ln()
 
+    # --- NUEVA SECCIÓN: INTELIGENCIA ARTIFICIAL ---
+    pdf.add_page()
+    pdf.set_font("helvetica", "B", 16)
+    pdf.set_text_color(30, 70, 150)  # Un azul elegante
+    pdf.cell(0, 15, "Dictamen de Inteligencia Artificial (IA)", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)  # Volver al negro
+
+    for ticker in tickers:
+        pdf.set_font("helvetica", "B", 12)
+        pdf.cell(0, 10, f"Análisis Detallado de {ticker}:", new_x="LMARGIN", new_y="NEXT")
+
+        pdf.set_font("helvetica", "", 10)
+        # El texto de la IA puede ser largo, usamos multi_cell
+        analysis_text = ai_reports.get(ticker, "No se generó análisis para este activo.")
+        pdf.multi_cell(0, 7, analysis_text)
+        pdf.ln(5)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())  # Línea divisoria suave
+        pdf.ln(5)
+
     return bytes(pdf.output())
 
 
@@ -174,22 +193,67 @@ if data is not None:
         st.plotly_chart(fig_corr)
 
     # --- BOTÓN DE DESCARGA ---
-    try:
-        # Pasamos TODOS los datos y figuras a la función del PDF
-        full_pdf_bytes = create_full_pdf(data, vol, corr, tickers, fig_main, fig_vol, fig_corr)
+    # --- LÓGICA PARA GENERAR LOS INFORMES DE IA ---
+    # Creamos un diccionario para guardar los análisis breves para el PDF
+    if 'ai_cache' not in st.session_state:
+        st.session_state.ai_cache = {}
 
-        st.sidebar.download_button(
-            label="📥 Descargar Reporte Completo (PDF)",
-            data=full_pdf_bytes,
-            file_name="reporte_integral.pdf",
-            mime="application/pdf"
-        )
-    except Exception as e:
-        st.sidebar.error(f"Error al preparar PDF: {e}")
+    if st.button("🤖 Generar Análisis IA para Informe PDF"):
+        with st.spinner("Analizando noticias de todos los activos..."):
+            from daily_bot_script import get_ai_analysis
+
+            for t in tickers:
+                st.session_state.ai_cache[t] = get_ai_analysis(t, is_brief=True)
+            st.success("Análisis completados. Ya puedes descargar el PDF.")
+
+    # --- ACTUALIZACIÓN DEL BOTÓN DE DESCARGA ---
+    if st.session_state.ai_cache:
+        try:
+            # Pasamos el diccionario ai_cache a la función del PDF
+            full_pdf_bytes = create_full_pdf(
+                data, vol, corr, tickers,
+                fig_main, fig_vol, fig_corr,
+                st.session_state.ai_cache
+            )
+
+            st.download_button(
+                label="📥 Descargar Reporte con IA (PDF)",
+                data=full_pdf_bytes,
+                file_name="reporte_ia_financiero.pdf",
+                mime="application/pdf"
+            )
+        except Exception as e:
+            st.error(f"Error al generar PDF: {e}")
+    else:
+        st.warning("Pulsa el botón de arriba para incluir el análisis de IA en el PDF.")
 
     # 4. Tabla de datos técnica
     with st.expander("Inspeccionar Data Lake (Parquet Format)"):
         st.dataframe(data.tail(10), width="stretch")
 
+    # --- SECCIÓN DE INTELIGENCIA ARTIFICIAL ---
+    st.divider()
+    st.header("🧠 AI Market Insights (Análisis Extendido)")
+
+    col_ia, col_info = st.columns([1, 2])
+
+    with col_ia:
+        selected_ticker = st.selectbox("Selecciona un activo para analizar en profundidad:", tickers)
+        analyze_btn = st.button("Generar Análisis Detallado")
+
+    if analyze_btn:
+        with st.spinner(f"La IA está procesando las últimas noticias de {selected_ticker}..."):
+            # Llamamos a la misma función pero con is_brief=False
+            from daily_bot_script import get_ai_analysis
+
+            reporte_largo = get_ai_analysis(selected_ticker, is_brief=False)
+
+            st.markdown(f"### Informe Detallado: {selected_ticker}")
+            st.info(reporte_largo)
+
+            # Añadir esto al PDF también sería el siguiente paso lógico
+
 else:
     st.error("Error al conectar con la API de datos. Revisa los tickers.")
+
+
