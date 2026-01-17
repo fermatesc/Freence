@@ -34,7 +34,7 @@ def send_telegram_alert(tickers, vol_data):
         return False
 
 
-def create_full_pdf(data, vol, corr, tickers, fig_main, fig_vol, fig_corr):
+def create_full_pdf(data, vol, corr, tickers, fig_main, fig_vol, fig_corr, ai_reports):
     """Genera un PDF completo con texto, imágenes de gráficos y tablas"""
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -199,10 +199,11 @@ if data is not None:
         st.session_state.ai_cache = {}
 
     if st.sidebar.button("🤖 Generar Análisis IA para Informe PDF"):
-        with st.spinner("Analizando noticias de todos los activos..."):
-            for t in tickers:
-                st.session_state.ai_cache[t] = get_ai_analysis(t, is_brief=True)
-            st.success("Análisis completados. Ya puedes descargar el PDF.")
+        with st.sidebar:
+            with st.spinner("Analizando noticias de todos los activos..."):
+                for t in tickers:
+                    st.session_state.ai_cache[t] = get_ai_analysis(t, is_brief=True)
+                st.success("Análisis completados. Ya puedes descargar el PDF.")
 
     # --- ACTUALIZACIÓN DEL BOTÓN DE DESCARGA ---
     if st.session_state.ai_cache:
@@ -214,7 +215,7 @@ if data is not None:
                 st.session_state.ai_cache
             )
 
-            st.download_button(
+            st.sidebar.download_button(
                 label="📥 Descargar Reporte con IA (PDF)",
                 data=full_pdf_bytes,
                 file_name="reporte_ia_financiero.pdf",
