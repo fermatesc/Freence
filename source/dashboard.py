@@ -221,9 +221,9 @@ if data is not None:
                 mime="application/pdf"
             )
         except Exception as e:
-            st.error(f"Error al generar PDF: {e}")
+            st.sidebar.error(f"Error al generar PDF: {e}")
     else:
-        st.warning("Pulsa el botón de arriba para incluir el análisis de IA en el PDF.")
+        st.sidebar.warning("Pulsa el botón de arriba para incluir el análisis de IA en el PDF.")
 
     # 4. Tabla de datos técnica
     with st.expander("Inspeccionar Data Lake (Parquet Format)"):
@@ -241,15 +241,9 @@ if data is not None:
 
     if analyze_btn:
         with st.spinner(f"La IA está procesando las últimas noticias de {selected_ticker}..."):
-            # Llamamos a la misma función pero con is_brief=False
-            from daily_bot_script import get_ai_analysis
-
             reporte_largo = get_ai_analysis(selected_ticker, is_brief=False)
-
             st.markdown(f"### Informe Detallado: {selected_ticker}")
             st.info(reporte_largo)
-
-            # Añadir esto al PDF también sería el siguiente paso lógico
 
 else:
     st.error("Error al conectar con la API de datos. Revisa los tickers.")
