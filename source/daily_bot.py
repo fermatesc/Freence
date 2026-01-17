@@ -56,7 +56,7 @@ def generate_summary():
     if high_vol:
         mensaje += f"⚠️ *Atención:* Alta volatilidad en: {', '.join(high_vol)}\n"
 
-    mensaje += "\n🔗 [Ver Dashboard Completo](https://tu-app.streamlit.app)"
+    mensaje += "\n🔗 [Ver Dashboard Completo](https://freence-fermat.streamlit.app/)"
 
     return mensaje
 
