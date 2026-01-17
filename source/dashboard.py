@@ -42,23 +42,23 @@ def create_full_pdf(data, vol, corr, tickers, fig_main, fig_vol, fig_corr):
     # Portada
     pdf.add_page()
     pdf.set_font("helvetica", "B", 20)
-    pdf.cell(0, 20, "Informe Integral de Inversión", ln=True, align='C')
+    pdf.cell(0, 20, "Informe Integral de Inversión", new_x="LMARGIN", new_y="NEXT", align='C')
     pdf.set_font("helvetica", "", 12)
-    pdf.cell(0, 10, f"Generado el: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align='C')
+    pdf.cell(0, 10, f"Generado el: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT", align='C')
     pdf.ln(10)
 
     # 1. Sección de Métricas (KPIs)
     pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 10, "1. Resumen de Mercado", ln=True)
+    pdf.cell(0, 10, "1. Resumen de Mercado", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", "", 11)
     for t in tickers:
         last_p = data[t].iloc[-1]
-        pdf.cell(0, 8, f"- {t}: {last_p:.2f}", ln=True)
+        pdf.cell(0, 8, f"- {t}: {last_p:.2f}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
 
     # 2. Gráfico de Rendimiento
     pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 10, "2. Evolución del Rendimiento (Base 100)", ln=True)
+    pdf.cell(0, 10, "2. Evolución del Rendimiento (Base 100)", new_x="LMARGIN", new_y="NEXT")
     img_main = pio.to_image(fig_main, format="png", width=800, height=400)
     pdf.image(io.BytesIO(img_main), x=10, w=190)
     pdf.ln(5)
@@ -66,7 +66,7 @@ def create_full_pdf(data, vol, corr, tickers, fig_main, fig_vol, fig_corr):
     # 3. Volatilidad y Correlación
     pdf.add_page()
     pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 10, "3. Análisis de Riesgo y Correlación", ln=True)
+    pdf.cell(0, 10, "3. Análisis de Riesgo y Correlación", new_x="LMARGIN", new_y="NEXT")
 
     # Imagen Volatilidad
     img_vol = pio.to_image(fig_vol, format="png", width=600, height=300)
@@ -80,7 +80,7 @@ def create_full_pdf(data, vol, corr, tickers, fig_main, fig_vol, fig_corr):
 
     # 4. Tabla de Datos (Últimos 10 días)
     pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 10, "4. Datos Históricos Recientes", ln=True)
+    pdf.cell(0, 10, "4. Datos Históricos Recientes", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", "", 8)
 
     # Dibujar una tabla simple
@@ -101,6 +101,7 @@ def create_full_pdf(data, vol, corr, tickers, fig_main, fig_vol, fig_corr):
         pdf.ln()
 
     return bytes(pdf.output())
+
 
 # --- INTERFAZ STREAMLIT ---
 
@@ -134,7 +135,7 @@ if data is not None:
     st.subheader("📈 Rendimiento Relativo (Base 100)")
     data_norm = (data / data.iloc[0]) * 100
     fig_main = px.line(data_norm, labels={'value': 'Crecimiento %', 'Date': 'Fecha'})
-    st.plotly_chart(fig_main, use_container_width=True)
+    st.plotly_chart(fig_main, width="stretch")
 
     # 3. Dos columnas para Riesgo y Correlación
     col_a, col_b = st.columns(2)
@@ -142,12 +143,12 @@ if data is not None:
     with col_a:
         st.subheader("⚡ Volatilidad Anualizada")
         fig_vol = px.bar(vol, color=vol.values, color_continuous_scale='Reds')
-        st.plotly_chart(fig_vol, use_container_width=True)
+        st.plotly_chart(fig_vol, width="stretch")
 
     with col_b:
         st.subheader("🔗 Matriz de Correlación")
         fig_corr = px.imshow(corr, text_auto=True, color_continuous_scale='RdBu_r', zmin=-1, zmax=1)
-        st.plotly_chart(fig_corr, use_container_width=True)
+        st.plotly_chart(fig_corr, width="stretch")
 
     # --- ACCIONES PRO (SIDEBAR) ---
     st.sidebar.markdown("---")
@@ -162,7 +163,7 @@ if data is not None:
     # Generamos las figuras y las mostramos en Streamlit
     data_norm = (data / data.iloc[0]) * 100
     fig_main = px.line(data_norm, title="Rendimiento")
-    st.plotly_chart(fig_main, use_container_width=True)
+    st.plotly_chart(fig_main, width="stretch")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -188,7 +189,7 @@ if data is not None:
 
     # 4. Tabla de datos técnica
     with st.expander("Inspeccionar Data Lake (Parquet Format)"):
-        st.dataframe(data.tail(10), use_container_width=True)
+        st.dataframe(data.tail(10), width="stretch")
 
 else:
     st.error("Error al conectar con la API de datos. Revisa los tickers.")
