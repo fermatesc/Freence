@@ -7,7 +7,7 @@ import numpy as np
 
 # Configuración de logs para parecer un pro
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
+yf.set_tz_cache_location(os.getcwd())
 
 class FinanceEngine:
     def __init__(self, tickers):
