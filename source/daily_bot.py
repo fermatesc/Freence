@@ -39,8 +39,7 @@ def get_ai_analysis(ticker, is_brief=True):
         return f"Análisis no disponible actualmente. ({e})"
 
 
-def run_daily_report():
-    tickers = ["AAPL", "BTC-USD", "GC=F", "MSFT"]
+def run_daily_report(tickers):
     engine = FinanceEngine(tickers)
     data = engine.extract_data(period="5d")
     returns, vol, _ = engine.transform_data()
@@ -58,12 +57,10 @@ def run_daily_report():
         mensaje += f"{emoji} *{t}*: `{last_p:.2f}` ({change:.2f}%)\n"
         mensaje += f"🧠 *IA:* {analisis_ia}\n\n"
 
-    # Enviar a Telegram
-    token = os.getenv("BOT_TOKEN")
-    chat_id = os.getenv("BOT_ID")
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    requests.post(url, data={"chat_id": chat_id, "text": mensaje, "parse_mode": "Markdown"})
+    url = f"https://api.telegram.org/bot{os.getenv("BOT_TOKEN")}/sendMessage"
+    requests.post(url, data={"chat_id": os.getenv("BOT_ID"), "text": mensaje, "parse_mode": "Markdown"})
 
 
 if __name__ == "__main__":
-    run_daily_report()
+    tickers = ["AAPL", "BTC-USD", "GC=F", "MSFT"]
+    run_daily_report(tickers)
