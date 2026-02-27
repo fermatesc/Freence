@@ -2,3 +2,9 @@
 source/.env
 .venv/
 data_output/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.sqlite
+*.cache

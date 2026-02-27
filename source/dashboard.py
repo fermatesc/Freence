@@ -11,6 +11,11 @@ import plotly.io as pio
 
 from finance_ingestor import FinanceEngine
 from daily_bot import get_ai_analysis
+from ml_engine import MLEngine
+from backtester import Backtester
+from portfolio_optimizer import PortfolioOptimizer
+from asset_screener import AssetScreener
+import io
 
 load_dotenv()
 
@@ -20,10 +25,61 @@ st.set_page_config(page_title="Data Investment Hub", layout="wide")
 
 # --- FUNCIONES DE UTILIDAD ---
 
-def send_telegram_alert(tickers, vol_data):
-    """Envía alerta de volatilidad por Telegram"""
+def send_telegram_alert(tickers, vol_data, price_data=None):
+    """Envía un resumen completo de la cartera por Telegram, incluyendo datos cuantitativos si están disponibles."""
+    lines = ["📊 *Resumen de Cartera — Data Investment Hub*\n"]
+
+    # --- Bloque 1: Estado actual de precios ---
+    if price_data is not None:
+        lines.append("💹 *Precios del Día:*")
+        for t in tickers:
+            try:
+                last_p = price_data[t].iloc[-1]
+                prev_p = price_data[t].iloc[-2]
+                chg = ((last_p / prev_p) - 1) * 100
+                emoji = "🟢" if chg >= 0 else "🔴"
+                lines.append(f"  {emoji} *{t}*: `{last_p:.2f}` ({chg:+.2f}%)")
+            except Exception:
+                lines.append(f"  ⚠️ Sin datos para {t}")
+        lines.append("")
+
+    # --- Bloque 2: Volatilidades ---
     top_vol = vol_data.idxmax()
-    message = f"⚠️ Alerta de Cartera\nActivo más volátil: {top_vol} ({vol_data[top_vol]:.2%})"
+    lines.append("🌊 *Volatilidades Anualizadas:*")
+    for t, v in vol_data.sort_values(ascending=False).items():
+        bar = "▓" * int(v * 10)
+        lines.append(f"  • {t}: `{v:.2%}` {bar}")
+    lines.append(f"\n⚠️ Activo más volátil: *{top_vol}*\n")
+
+    # --- Bloque 3: Markowitz (si se ejecutó en la sesión actual) ---
+    markowitz_res = st.session_state.get("markowitz_res")
+    if markowitz_res:
+        opt = markowitz_res.get('opt_results', {})
+        lines.append("📐 *Distribución Óptima (Markowitz):*")
+        for ticker, w in opt.get('weights', {}).items():
+            bar = "█" * int(w * 20)
+            lines.append(f"  • *{ticker}*: `{w:.1%}` {bar}")
+        sharpe = opt.get('sharpe_ratio', 0)
+        exp_ret = opt.get('expected_return', 0) * 100  # Convertir de decimal a %
+        exp_vol = opt.get('expected_volatility', 0) * 100  # Convertir de decimal a %
+        lines.append(f"  Sharpe: `{sharpe:.2f}` | Retorno: `{exp_ret:.2f}%` | Riesgo: `{exp_vol:.2f}%`\n")
+
+    # --- Bloque 4: Modelo ML (si se entrenó en la sesión actual) ---
+    bt_results = st.session_state.get("bt_results")
+    if bt_results:
+        acc = bt_results['report'].get('WFO_Accuracy', 'N/A')
+        acc_str = f"{acc:.2f}%" if isinstance(acc, float) else str(acc)
+        metrics = bt_results.get('metrics', {})
+        total_ret = metrics.get('Retorno Total (%)', metrics.get('Total Return [%]', 'N/A'))
+        bench_ret = metrics.get('Retorno Anualizado (%)', metrics.get('Benchmark Return [%]', 'N/A'))
+        lines.append(f"🤖 *Modelo ML ({bt_results['model_type']}):*")
+        lines.append(f"  Precisión WFO: `{acc_str}`")
+        if isinstance(total_ret, float) and isinstance(bench_ret, float):
+            lines.append(f"  Retorno Total IA: `{total_ret:.2f}%` | Retorno Anualizado: `{bench_ret:.2f}%`\n")
+        else:
+            lines.append(f"  Retorno Total IA: `{total_ret}` | Retorno Anualizado: `{bench_ret}`\n")
+
+    message = "\n".join(lines)
 
     url = f"https://api.telegram.org/bot{os.getenv('BOT_TOKEN')}/sendMessage"
     data = {"chat_id": os.getenv('BOT_ID'), "text": message, "parse_mode": "Markdown"}
@@ -34,7 +90,7 @@ def send_telegram_alert(tickers, vol_data):
         return False
 
 
-def create_full_pdf(data, vol, corr, tickers, fig_main, fig_vol, fig_corr, ai_reports):
+def create_full_pdf(data, vol, corr, tickers, fig_main, fig_vol, fig_corr, ai_reports, bt_results=None, markowitz_res=None):
     """Genera un PDF completo con texto, imágenes de gráficos y tablas"""
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -119,6 +175,50 @@ def create_full_pdf(data, vol, corr, tickers, fig_main, fig_vol, fig_corr, ai_re
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())  # Línea divisoria suave
         pdf.ln(5)
 
+    # --- FINAL SECCIÓN: CUANTITATIVO Y MACHINE LEARNING ---
+    if markowitz_res or bt_results:
+        pdf.add_page()
+        pdf.set_font("helvetica", "B", 16)
+        pdf.cell(0, 15, "Insights Cuantitativos y Machine Learning", new_x="LMARGIN", new_y="NEXT")
+
+        if markowitz_res:
+            opt = markowitz_res.get('opt_results', {})
+            pdf.set_font("helvetica", "B", 12)
+            pdf.cell(0, 10, "Portafolio Óptimo (Markowitz Sharpe Max):", new_x="LMARGIN", new_y="NEXT")
+            
+            # Gráfico de pesos
+            img_pie = pio.to_image(markowitz_res['fig'], format="png", width=600, height=400)
+            pdf.image(io.BytesIO(img_pie), x=10, y=pdf.get_y(), w=120)
+            
+            pdf.set_y(pdf.get_y() + 85)
+            pdf.set_font("helvetica", "", 10)
+            exp_ret = opt.get('expected_return', 0) * 100  # Decimal a %
+            exp_vol = opt.get('expected_volatility', 0) * 100  # Decimal a %
+            pdf.cell(0, 8, f"- Retorno Esperado: {exp_ret:.2f}%", new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 8, f"- Volatilidad (Riesgo): {exp_vol:.2f}%", new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 8, f"- Sharpe Ratio: {opt.get('sharpe_ratio', 0):.2f}", new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(10)
+
+        if bt_results:
+            pdf.set_font("helvetica", "B", 12)
+            pdf.cell(0, 10, f"Predicciones IA - Modelo {bt_results['model_type']}:", new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font("helvetica", "", 10)
+            
+            acc = bt_results['report'].get('WFO_Accuracy', 'N/A')
+            acc_str = f"{acc:.2f}%" if isinstance(acc, float) else str(acc)
+            pdf.cell(0, 8, f"- Precisión WFO (Walk-Forward): {acc_str}", new_x="LMARGIN", new_y="NEXT")
+            
+            metrics = bt_results.get('metrics', {})
+            total_ret = metrics.get('Retorno Total (%)', metrics.get('Total Return [%]', 'N/A'))
+            anual_ret = metrics.get('Retorno Anualizado (%)', metrics.get('Ann. Return [%]', 'N/A'))
+            drawdown  = metrics.get('Max Drawdown (%)', metrics.get('Max Drawdown [%]', 'N/A'))
+            win_rate  = metrics.get('Win Rate (%)', metrics.get('Win Rate [%]', 'N/A'))
+            
+            pdf.cell(0, 8, f"- Retorno Total IA: {total_ret:.2f}%" if isinstance(total_ret, float) else f"- Retorno Total IA: {total_ret}", new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 8, f"- Retorno Anualizado IA: {anual_ret:.2f}%" if isinstance(anual_ret, float) else f"- Retorno Anualizado IA: {anual_ret}", new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 8, f"- Max Drawdown: {drawdown:.2f}%" if isinstance(drawdown, float) else f"- Max Drawdown: {drawdown}", new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 8, f"- Win Rate: {win_rate:.2f}%" if isinstance(win_rate, float) else f"- Win Rate: {win_rate}", new_x="LMARGIN", new_y="NEXT")
+
     return bytes(pdf.output())
 
 
@@ -129,7 +229,13 @@ st.markdown("Plataforma de ingeniería de datos financieros")
 
 # Sidebar
 st.sidebar.header("Configuración")
-tickers_input = st.sidebar.text_input("Lista de Tickers", "AAPL, BTC-USD, GC=F, MSFT, IWDA.AS")
+# Mantener tickers base en sesión para poder agregar dinámicamente
+if 'base_tickers' not in st.session_state:
+    st.session_state.base_tickers = "AAPL, BTC-USD, GC=F, MSFT, IWDA.AS"
+
+tickers_input = st.sidebar.text_input("Lista de Tickers", st.session_state.base_tickers)
+st.session_state.base_tickers = tickers_input # Actualiza si el user escribe manual
+
 periodo = st.sidebar.selectbox("Rango Temporal", ["1mo", "6mo", "1y", "2y", "5y"], index=2)
 tickers = [t.strip() for t in tickers_input.split(",")]
 
@@ -174,8 +280,8 @@ if data is not None:
     st.sidebar.header("🚀 Funciones Pro")
 
     if st.sidebar.button("🔔 Enviar Alerta Telegram"):
-        if send_telegram_alert(tickers, vol):
-            st.sidebar.success("Alerta enviada")
+        if send_telegram_alert(tickers, vol, price_data=data):
+            st.sidebar.success("Resumen enviado a Telegram ✅")
         else:
             st.sidebar.error("Error en API Telegram")
 
@@ -212,7 +318,9 @@ if data is not None:
             full_pdf_bytes = create_full_pdf(
                 data, vol, corr, tickers,
                 fig_main, fig_vol, fig_corr,
-                st.session_state.ai_cache
+                st.session_state.ai_cache,
+                bt_results=st.session_state.get('bt_results'),
+                markowitz_res=st.session_state.get('markowitz_res')
             )
 
             st.sidebar.download_button(
@@ -230,9 +338,194 @@ if data is not None:
     with st.expander("Inspeccionar Data Lake (Parquet Format)"):
         st.dataframe(data.tail(10), width="stretch")
 
-    # --- SECCIÓN DE INTELIGENCIA ARTIFICIAL ---
+    # --- NUEVA SECCIÓN: RADAR DE OPORTUNIDADES (FINVIZ) ---
     st.divider()
-    st.header("🧠 AI Market Insights (Análisis Extendido)")
+    st.header("🌍 Radar de Oportunidades Global (Finviz & Correlación)")
+    st.markdown("Busca nuevos activos en el mercado global que matemáticamente te ayuden a **diversificar y mejorar** tu portafolio actual.")
+
+    col_screener, col_s_opts = st.columns([1, 3])
+    with col_screener:
+        st.subheader("Filtros de Búsqueda")
+        s_market_cap = st.selectbox("Market Cap", ["Any", "Mega ($200bln and more)", "+Large (over $10bln)", "+Mid (over $2bln)", "+Small (over $300mln)"])
+        s_sector = st.selectbox("Sector", ["Any", "Technology", "Healthcare", "Financial", "Energy", "Consumer Defensive"])
+        s_index = st.selectbox("Index", ["Any", "S&P 500", "DJIA"])
+        btn_search = st.button("🔍 Escanear Mercado", use_container_width=True)
+        
+    with col_s_opts:
+        if btn_search:
+            with st.spinner("Conectando con Finviz y analizando correlaciones con tu cartera..."):
+                screener = AssetScreener(current_tickers=tickers)
+                res_df, msg = screener.find_opportunities(
+                    market_cap=s_market_cap,
+                    sector=s_sector,
+                    index=s_index
+                )
+                
+                st.session_state.screener_results = res_df
+                st.session_state.screener_msg = msg
+                
+        if 'screener_results' in st.session_state:
+            st.info(st.session_state.screener_msg)
+            df_res = st.session_state.screener_results
+            
+            if not df_res.empty:
+                st.dataframe(df_res.style.format({
+                    'Correlación vs Cartera': "{:.2f}",
+                    'Retorno (6m)': "{:.2%}",
+                    'Riesgo (Volatilidad)': "{:.2%}"
+                }))
+                
+                st.markdown("Añadir candidatos seleccionados a tu cartera principal:")
+                add_tickers = st.multiselect("Selecciona los Tickers que quieres analizar en el Dashboard:", df_res['Ticker'].tolist())
+                
+                if st.button("➕ Añadir a mi Portafolio"):
+                    new_list = st.session_state.base_tickers + ", " + ", ".join(add_tickers)
+                    st.session_state.base_tickers = new_list
+                    st.success("Activos añadidos con éxito. ¡Refresca la página o haz click en cualquier botón del menú lateral para recargar todo el sistema con tus nuevos activos!")
+
+    # --- NUEVA SECCIÓN: PREDICCIÓN Y BACKTESTING ---
+    st.divider()
+    st.header("🔮 IA Predictiva (Machine Learning) y Backtesting")
+    st.markdown("Entrena modelos de Machine Learning en *tiempo real* para pronosticar la dirección del próximo movimiento y simula su rendimiento.")
+
+    col_model, col_bt = st.columns([1, 2])
+
+    with col_model:
+        st.subheader("Configuración del Modelo")
+        target_ticker = st.selectbox("Activo a modelar:", tickers, key="ml_ticker")
+        horizon = st.slider("Horizonte de Predicción (Días):", 1, 10, 5, help="Predice si el precio subirá o bajará de aquí a X días.")
+        model_type = st.radio("Algoritmo", ["XGBoost", "Random Forest"])
+        comission = st.number_input("Comisión por Operación (%)", value=0.1, step=0.01) / 100.0
+        
+        run_backtest = st.button("🚀 Entrenar y Simular (VectorBT)", use_container_width=True)
+
+    with col_bt:
+        if run_backtest:
+            with st.spinner(f"1. Calculando Indicadores Técnicos y Targets para {target_ticker}..."):
+                # Inicializar el Engine de ML pasando la serie o el dataframe del activo
+                ml_sys = MLEngine(data[target_ticker])
+                
+                # Crear Feactures y Target
+                features, target = ml_sys.create_features_and_target(target_horizon=horizon)
+            
+            with st.spinner(f"2. Entrenando {model_type} (Time Series Split)..."):
+                # Entrenar modelo (WFO)
+                eval_results = ml_sys.train_and_evaluate(model_name=model_type, n_splits=5)
+                
+                # Generar conjunto de señales de trading para toda la serie
+                signals = ml_sys.generate_signals(model_name=model_type)
+
+            with st.spinner("3. Ejecutando Backtester (Cálculo Vectorial)..."):
+                # Ejecutar Backtest
+                bt = Backtester(ml_sys.df_processed['Close'], signals, comission_pct=comission)
+                metrics = bt.get_metrics()
+                bt_fig = bt.get_plotly_chart()
+                
+            st.success("✅ Simulación completada.")
+            
+            # --- MOSTRAR RESULTADOS ---
+            # Guardamos los resultados iterativos en sesión para la recarga
+            st.session_state.bt_results = {
+                'fig': bt_fig,
+                'accuracy': eval_results['accuracy'],
+                'report': {**eval_results['report'], 'WFO_Accuracy': eval_results['accuracy'] * 100},
+                'metrics': metrics,
+                'model_type': model_type
+            }
+            
+        if 'bt_results' in st.session_state:
+            res = st.session_state.bt_results
+            tabs = st.tabs(["Gráfico de Rendimiento", "Métricas del Modelo", "Estadísticas del Backtest"])
+            
+            with tabs[0]:
+                st.plotly_chart(res['fig'], use_container_width=True)
+                
+            with tabs[1]:
+                st.markdown("#### Precisión del Modelo (Walk-Forward Optimization)")
+                st.metric(label=f"Avg WFO Accuracy ({res['model_type']})", value=f"{res['accuracy']:.2%}")
+                st.markdown("*(Nota: En finanzas, una precisión WFO superior al 53-55% ya es excepcionalmente buena debido a la naturaleza aleatoria del mercado).*")
+                
+                st.markdown("#### Matriz de Clasificación (Último Fold)")
+                st.dataframe(pd.DataFrame(res['report']).transpose().style.format("{:.2f}"))
+
+            with tabs[2]:
+                st.markdown("#### Métricas Financieras (VectorBT)")
+                
+                # Mostrar métricas en formato grid usando columnas
+                m_cols = st.columns(3)
+                idx = 0
+                for k, v in res['metrics'].items():
+                    with m_cols[idx % 3]:
+                        # Formateo dependiendo del tipo de dato
+                        val = float(v) if isinstance(v, (int, float)) else 0
+                        if pd.isna(val):
+                            val = 0
+                            
+                        if "%" in k or k == "Win Rate [%]":
+                            st.metric(k, f"{val:.2f}%")
+                        elif "Sharpe" in k:
+                            st.metric(k, f"{val:.2f}")
+                        else:
+                            st.metric(k, f"{int(val)}")
+                    idx += 1
+                        
+
+    # --- NUEVA SECCIÓN: GESTIÓN DE PORTAFOLIO (MARKOWITZ) ---
+    st.divider()
+    st.header("⚖️ Gestión Cuantitativa de Cartera (Frontera de Markowitz)")
+    st.markdown("El optimizador matemático calcula **exactamente qué porcentaje de tu capital** deberías invertir en cada uno de los activos seleccionados para maximizar tus retornos ajustados al riesgo (Sharpe Ratio).")
+
+    if st.button("📊 Calcular Distribución Óptima de Capital"):
+        with st.spinner("Resolviendo modelo matemático de varianza media de Markowitz..."):
+            port_opt = PortfolioOptimizer(data)
+            opt_results = port_opt.optimize_max_sharpe()
+            
+            w_df = pd.DataFrame.from_dict(opt_results['weights'], orient='index', columns=['Peso Asignado'])
+            w_df = w_df[w_df['Peso Asignado'] > 0.001] # Filtrar activos con 0% de peso
+            
+            # Gráfico Torta de Plotly
+            fig_pie = px.pie(
+                values=w_df['Peso Asignado'], 
+                names=w_df.index, 
+                title="Composición de Portafolio Ideal (Max Sharpe)",
+                hole=0.4 # Estilo "Donut"
+            )
+            fig_pie.update_traces(textinfo='percent+label', textfont_size=12)
+
+            w_df_display = w_df.copy()
+            w_df_display['Peso Asignado'] = (w_df_display['Peso Asignado'] * 100).map("{:.2f}%".format)
+            
+            # Guardamos los resultados de Markowitz
+            st.session_state.markowitz_res = {
+                'fig': fig_pie,
+                'opt_results': opt_results,
+                'w_df_display': w_df_display
+            }
+            
+    if 'markowitz_res' in st.session_state:
+        m_res = st.session_state.markowitz_res
+        
+        # Mostrar la UI de Markowitz
+        col_weights, col_metrics = st.columns([1, 1])
+        
+        with col_weights:
+            st.plotly_chart(m_res['fig'], use_container_width=True)
+            
+        with col_metrics:
+            st.subheader("Métricas Teóricas Anualizadas")
+            st.metric("Retorno Esperado del Portafolio", f"{m_res['opt_results']['expected_return'] * 100:.2f}%")
+            st.metric("Volatilidad Esperada (Riesgo)", f"{m_res['opt_results']['expected_volatility'] * 100:.2f}%")
+            st.metric("Ratio de Sharpe Máximo Alcanzado", f"{m_res['opt_results']['sharpe_ratio']:.3f}")
+            
+            st.markdown("---")
+            st.markdown("### Tabla de Pesos Óptimos")
+            
+            # Mostrar tabla limpia
+            st.dataframe(m_res['w_df_display'], width=300)
+
+    # --- SECCIÓN DE INTELIGENCIA ARTIFICIAL (NOTICIAS GROQ) ---
+    st.divider()
+    st.header("🧠 AI Market Insights (Análisis Semántico de Noticias)")
 
     col_ia, col_info = st.columns([1, 2])
 
@@ -240,11 +533,21 @@ if data is not None:
         selected_ticker = st.selectbox("Selecciona un activo para analizar en profundidad:", tickers)
         analyze_btn = st.button("Generar Análisis Detallado")
 
-    if analyze_btn:
-        with st.spinner(f"La IA está procesando las últimas noticias de {selected_ticker}..."):
-            reporte_largo = get_ai_analysis(selected_ticker, is_brief=False)
-            st.markdown(f"### Informe Detallado: {selected_ticker}")
-            st.info(reporte_largo)
+    with col_info:
+        if analyze_btn:
+            with st.spinner(f"La IA Semántica está procesando las últimas noticias de {selected_ticker}..."):
+                reporte_largo = get_ai_analysis(selected_ticker, is_brief=False)
+                
+                if 'ai_reports_long' not in st.session_state:
+                    st.session_state.ai_reports_long = {}
+                
+                st.session_state.ai_reports_long[selected_ticker] = reporte_largo
+                st.session_state.last_analyzed_ticker = selected_ticker
+                
+        if 'ai_reports_long' in st.session_state and 'last_analyzed_ticker' in st.session_state:
+            last_t = st.session_state.last_analyzed_ticker
+            st.markdown(f"### Informe Detallado: {last_t}")
+            st.info(st.session_state.ai_reports_long[last_t])
 
 else:
     st.error("Error al conectar con la API de datos. Revisa los tickers.")
