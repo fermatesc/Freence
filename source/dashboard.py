@@ -1,20 +1,33 @@
+import asyncio
+import nest_asyncio
+import re
+
+# --- FIX: Asyncio Loop for Streamlit (REQUIRED FOR IBKR) ---
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+nest_asyncio.apply()
+
 import os
 import io
 import requests
-
-import streamlit as st
-import pandas as pd
-import plotly.express as px
 from fpdf import FPDF
+import pandas as pd
+import numpy as np
+import plotly.express as px
 from dotenv import load_dotenv
 import plotly.io as pio
+import streamlit as st
 
-from finance_ingestor import FinanceEngine
-from daily_bot import get_ai_analysis
-from ml_engine import MLEngine
-from backtester import Backtester
-from portfolio_optimizer import PortfolioOptimizer
-from asset_screener import AssetScreener
+from data.finance_ingestor import FinanceEngine
+from notifications.daily_bot import get_ai_analysis
+from ml.ml_engine import MLEngine
+from ml.backtester import Backtester
+from data.portfolio_optimizer import PortfolioOptimizer
+from data.asset_screener import AssetScreener
 import io
 
 load_dotenv()
@@ -84,9 +97,13 @@ def send_telegram_alert(tickers, vol_data, price_data=None):
     url = f"https://api.telegram.org/bot{os.getenv('BOT_TOKEN')}/sendMessage"
     data = {"chat_id": os.getenv('BOT_ID'), "text": message, "parse_mode": "Markdown"}
     try:
-        requests.post(url, data=data)
-        return True
-    except:
+        # A3: timeout explícito y verificación de respuesta HTTP
+        resp = requests.post(url, data=data, timeout=5)
+        return resp.ok
+    except Exception as e:
+        # A2: except tipado con log del error
+        import logging
+        logging.getLogger(__name__).error(f"Error Telegram send_telegram_alert: {e}")
         return False
 
 
@@ -233,17 +250,42 @@ st.sidebar.header("Configuración")
 if 'base_tickers' not in st.session_state:
     st.session_state.base_tickers = "AAPL, BTC-USD, GC=F, MSFT, IWDA.AS"
 
+# A1: Función de validación de tickers
+def _sanitize_ticker(t: str):
+    """Solo acepta caracteres válidos para un ticker (letras, dígitos, guión, punto, igual)."""
+    t = t.strip().upper()
+    if re.match(r'^[A-Z0-9\-\.\=]{1,20}$', t):
+        return t
+    return None
+
 tickers_input = st.sidebar.text_input("Lista de Tickers", st.session_state.base_tickers)
-st.session_state.base_tickers = tickers_input # Actualiza si el user escribe manual
+st.session_state.base_tickers = tickers_input  # Actualiza si el user escribe manual
 
 periodo = st.sidebar.selectbox("Rango Temporal", ["1mo", "6mo", "1y", "2y", "5y"], index=2)
-tickers = [t.strip() for t in tickers_input.split(",")]
+# A1: Filtrar tickers inválidos antes de cualquier operación
+tickers_raw = [t.strip() for t in tickers_input.split(",")]
+tickers = [r for r in (_sanitize_ticker(t) for t in tickers_raw) if r]
+if not tickers:
+    st.error("❌ Ninguno de los tickers introducidos es válido. Usa formato como: AAPL, BTC-USD, GC=F")
+    st.stop()
+
+
+# L2: Cache de datos de mercado para evitar re-descarga en cada interacción del usuario
+@st.cache_data(ttl=3600)
+def _load_market_data(tickers_tuple: tuple, period: str):
+    """Descarga y cachea datos de mercado durante 1 hora."""
+    eng = FinanceEngine(list(tickers_tuple))
+    return eng.extract_data(period=period)
+
 
 # Inicializar motor
 engine = FinanceEngine(tickers)
-data = engine.extract_data(period=periodo)
+data = _load_market_data(tuple(tickers), periodo)
 
 if data is not None:
+    # ASERCIÓN DE DATOS: Pasamos los datos del caché al motor interno
+    engine.data = data 
+    
     # Procesar métricas
     returns, vol, corr = engine.transform_data()
 
@@ -551,5 +593,147 @@ if data is not None:
 
 else:
     st.error("Error al conectar con la API de datos. Revisa los tickers.")
+
+# ─────────────────────────────────────────────────────────────────
+# 🏦 CONTROL DE TRADING EN VIVO (IBKR)
+# ─────────────────────────────────────────────────────────────────
+st.divider()
+st.header("🏦 Control de Trading en Vivo (Interactive Brokers)")
+
+# Importaciones locales aquí para no interrumpir la carga si TWS no está activo
+from core.broker_executor import BrokerExecutor, IS_LIVE
+from core.risk_manager import RiskManager
+from core.trading_runner import run_trading_session, JOURNAL_PATH
+import os
+
+# --- Indicador de modo ---
+mode_label = "🔴 **LIVE — DINERO REAL**" if IS_LIVE else "🟡 **PAPER TRADING — Simulación Segura**"
+st.markdown(f"### Modo Activo: {mode_label}")
+if IS_LIVE:
+    st.warning("⚠️ Estás en modo LIVE. Las órdenes se ejecutan con dinero real en tu cuenta de IBKR.")
+else:
+    st.info("ℹ️ Modo Paper. Para activar Live, añade `LIVE_TRADING=true` al fichero `.env` y reinicia.")
+
+col_trading_1, col_trading_2 = st.columns([2, 1])
+
+with col_trading_1:
+    st.subheader("📊 Cuenta y Posiciones")
+
+    if st.button("🔄 Actualizar Estado de la Cuenta"):
+        with st.spinner("Conectando con IBKR..."):
+            broker = BrokerExecutor()
+            if broker.connect():
+                account_info = broker.get_account_balance()
+                positions_info = broker.get_open_positions()
+                broker.disconnect()
+                st.session_state['ibkr_account'] = account_info
+                st.session_state['ibkr_positions'] = positions_info
+                st.success("Conectado y datos actualizados ✅")
+            else:
+                st.error("❌ No se pudo conectar a Interactive Brokers.")
+                st.info("""
+                **Sigue estos pasos en TWS:**
+                1. Ve a `File` -> `Global Configuration`
+                2. Busca `API` -> `Settings` en el menú izquierdo
+                3. ✅ Marca: **'Enable ActiveX and Socket Clients'**
+                4. ✅ Desmarca: **'Read-Only API'** (para poder operar)
+                5. Verifica el puerto: `7497` (Paper) o `7496` (Live)
+                """)
+
+    if 'ibkr_account' in st.session_state:
+        acc = st.session_state['ibkr_account']
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Capital Disponible", f"{acc.get('AvailableFunds', 0):.2f} €")
+        c2.metric("Valor Neto (NAV)", f"{acc.get('NetLiquidation', 0):.2f} €")
+        c3.metric("PnL Hoy", f"{acc.get('RealizedPnL', 0):.2f} €",
+                  delta_color="normal" if acc.get('RealizedPnL', 0) >= 0 else "inverse")
+
+    if 'ibkr_positions' in st.session_state:
+        positions_df = pd.DataFrame(st.session_state['ibkr_positions'])
+        if not positions_df.empty:
+            st.dataframe(positions_df, use_container_width=True)
+        else:
+            st.caption("Sin posiciones abiertas actualmente.")
+
+    # Parámetros de la sesión de trading
+    st.subheader("⚙️ Configuración de Sesión")
+    trading_tickers = st.multiselect(
+        "Activos a operar",
+        options=tickers if data is not None else ["AAPL", "MSFT"],
+        default=tickers[:2] if data is not None and len(tickers) >= 2 else []
+    )
+    trading_model = st.radio("Modelo ML", ["XGBoost", "Random Forest"], horizontal=True)
+    force_retrain = st.checkbox("🔄 Forzar Reentrenamiento (Ignorar modelos guardados)", value=False)
+
+    # Mostrar resumen de guardarraíles activos
+    with st.expander("🛡️ Guardarraíles de Riesgo Activos"):
+        risk = RiskManager()
+        capital_est = st.session_state.get('ibkr_account', {}).get('AvailableFunds', 300.0)
+        risk_summary = risk.get_risk_summary(capital_est)
+        for k, v in risk_summary.items():
+            st.markdown(f"- **{k}**: {v}")
+
+with col_trading_2:
+    st.subheader("🎮 Acciones")
+
+    # --- Botón de Ejecución ---
+    if st.button("▶️ Ejecutar Sesión de Trading", type="primary", use_container_width=True):
+        if not trading_tickers:
+            st.error("Selecciona al menos un activo para operar.")
+        else:
+            with st.spinner(f"Ejecutando sesión en {broker.mode if 'broker' in dir() else 'PAPER'}..."):
+                result = run_trading_session(
+                    trading_tickers,
+                    model_type=trading_model,
+                    force_retrain=force_retrain
+                )
+                st.session_state['trading_result'] = result
+
+            if result.get('status') == 'ok':
+                st.success("✅ Sesión completada. Revisa el journal.")
+            else:
+                st.error(f"Error: {result.get('msg', 'Desconocido')}")
+
+    st.markdown("---")
+
+    # --- Kill Switch (C3: Protegido con contraseña) ---
+    st.markdown("### 🛑 Kill Switch")
+    st.caption("Cancela TODAS las órdenes pendientes inmediatamente.")
+    ks_password = st.text_input(
+        "🔐 Contraseña Kill Switch",
+        type="password",
+        key="ks_pwd",
+        help="Configura KILL_SWITCH_PASSWORD en el fichero .env"
+    )
+    if st.button("🛑 ACTIVAR KILL SWITCH", type="secondary", use_container_width=True):
+        expected_ks_pwd = os.getenv("KILL_SWITCH_PASSWORD", "")
+        if not expected_ks_pwd:
+            st.error("❌ KILL_SWITCH_PASSWORD no está configurado en .env. Añádelo para activar el Kill Switch.")
+        elif ks_password != expected_ks_pwd:
+            st.error("❌ Contraseña incorrecta. No se cancelaron órdenes.")
+        else:
+            with st.spinner("Cancelando todas las órdenes..."):
+                broker_ks = BrokerExecutor()
+                if broker_ks.connect():
+                    ok = broker_ks.cancel_all_orders()
+                    broker_ks.disconnect()
+                    if ok:
+                        st.success("🛑 Kill Switch activado. Todas las órdenes canceladas.")
+                    else:
+                        st.error("Error al cancelar órdenes.")
+                else:
+                    st.error("No se pudo conectar a IBKR.")
+
+# --- Audit Journal Viewer ---
+st.subheader("📋 Registro de Auditoría (Trading Journal)")
+if os.path.isfile(JOURNAL_PATH):
+    df_journal = pd.read_csv(JOURNAL_PATH)
+    # Mostrar las últimas 20 entradas en orden cronológico inverso
+    st.dataframe(df_journal.tail(20).iloc[::-1], use_container_width=True)
+    with open(JOURNAL_PATH, 'rb') as f:
+        st.download_button("⬇️ Descargar Journal CSV", f, file_name="trading_journal.csv")
+else:
+    st.caption("Sin historial de operaciones todavía. Ejecuta una sesión de trading para comenzar.")
+
 
 

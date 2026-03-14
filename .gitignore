@@ -1,6 +1,16 @@
 .idea/
+
+# ─── Secretos ──────────────────────────────────────────────────
+.env
 source/.env
+*.env
+
+# ─── Entornos virtuales ────────────────────────────────────────
 .venv/
+venv/
+env/
+
+# ─── Caché y bases de datos temporales ────────────────────────
 data_output/
 __pycache__/
 *.pyc
@@ -8,3 +18,15 @@ __pycache__/
 *.db
 *.sqlite
 *.cache
+
+# ─── Modelos ML entrenados ─────────────────────────────────────
+source/models/
+
+# ─── Auditoría / Datos financieros sensibles ──────────────────
+source/trading_journal*.csv
+
+# ─── Logs ──────────────────────────────────────────────────────
+*.log
+
+# ─── Estado del Circuit Breaker ────────────────────────────────
+source/.circuit_state.json
