@@ -34,6 +34,74 @@ class FinanceEngine:
             logging.error(f"Error en la extracción: {e}")
             return None
 
+    def extract_full_data(self, period="1y", interval="1d", include_macro=True) -> dict:
+        """
+        Extrae todos los datos (OHLCV) de los activos y añade de forma opcional
+        indicadores macro (SPY, VIX) sincronizados por fecha.
+        Soporta datos intradía cambiando 'interval' (ej. '1m', '5m', '1h').
+        Retorna un diccionario: { "Ticker": pd.DataFrame(...) }
+        """
+        logging.info(f"Extrayendo datos FULL para ML: {self.tickers} (Interval: {interval})")
+        
+        macro_df = pd.DataFrame()
+        if include_macro:
+            try:
+                spy_raw = yf.download("SPY", period=period, interval=interval, progress=False)
+                if not spy_raw.empty:
+                    if isinstance(spy_raw.columns, pd.MultiIndex):
+                        spy_col = 'Adj Close' if 'Adj Close' in spy_raw.columns.levels[0] else 'Close'
+                        macro_df['SPY_Close'] = spy_raw[spy_col]['SPY']
+                    else:
+                        spy_col = 'Adj Close' if 'Adj Close' in spy_raw.columns else 'Close'
+                        macro_df['SPY_Close'] = spy_raw[spy_col]
+                else:
+                    logging.warning("No se pudo descargar SPY")
+                
+                vix_raw = yf.download("^VIX", period=period, interval=interval, progress=False)
+                if not vix_raw.empty:
+                    if isinstance(vix_raw.columns, pd.MultiIndex):
+                        macro_df['VIX_Close'] = vix_raw['Close']['^VIX']
+                    else:
+                        macro_df['VIX_Close'] = vix_raw['Close']
+                else:
+                    logging.warning("No se pudo descargar ^VIX. Rellenando con 20.0 (mediana histórica) temporalmente.")
+                    macro_df['VIX_Close'] = 20.0
+            except Exception as e:
+                logging.warning(f"Error parseando datos macro (SPY, VIX): {e}")
+                if 'VIX_Close' not in macro_df.columns:
+                    macro_df['VIX_Close'] = 20.0
+
+        try:
+            raw_data = yf.download(self.tickers, period=period, interval=interval, progress=False)
+            raw_data = raw_data.ffill().dropna(how='all')
+        except Exception as e:
+            logging.error(f"Error en la extracción FULL: {e}")
+            return {}
+
+        full_data_dict = {}
+        if isinstance(raw_data.columns, pd.MultiIndex):
+            for t in self.tickers:
+                try:
+                    df_t = raw_data.xs(t, axis=1, level=1).copy()
+                    if not macro_df.empty:
+                        df_t = df_t.join(macro_df, how='left')
+                    df_t = df_t.ffill().dropna()
+                    if not df_t.empty:
+                        full_data_dict[t] = df_t
+                except KeyError:
+                    logging.warning(f"Datos no encontrados para {t}")
+        else:
+            if len(self.tickers) == 1:
+                t = self.tickers[0]
+                df_t = raw_data.copy()
+                if not macro_df.empty:
+                    df_t = df_t.join(macro_df, how='left')
+                df_t = df_t.ffill().dropna()
+                if not df_t.empty:
+                    full_data_dict[t] = df_t
+
+        return full_data_dict
+
     def transform_data(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Cálculos financieros clave usando lógica vectorial de Pandas"""
         logging.info("Calculando métricas financieras...")

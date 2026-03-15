@@ -1,0 +1,19 @@
+timestamp,mode,ticker,signal,price,qty,stop_loss,capital_before,daily_pnl,model_accuracy,risk_approved,risk_reason,order_status,order_id,notes
+2026-03-15T22:31:06.482952,🟡 PAPER TRADING,AAPL,,,,,1024826.65,0.0,,,,ERROR,,"""['SPY_Close'] not in index"""
+2026-03-15T22:31:06.518432,🟡 PAPER TRADING,MSFT,,,,,1024826.65,0.0,,,,ERROR,,"""['SPY_Close'] not in index"""
+2026-03-15T22:35:31.360714,🟡 PAPER TRADING,AAPL,NEUTRAL,250.12,,,1024826.65,0.0,0.5644,True,OK,NO_ACTION,,Status: loaded
+2026-03-15T22:35:31.588371,🟡 PAPER TRADING,MSFT,NEUTRAL,395.55,,,1024826.65,0.0,0.5644,True,OK,NO_ACTION,,Status: loaded
+2026-03-15T22:36:37.225520,🟡 PAPER TRADING,AAPL,,,,,1024826.65,0.0,,,,ERROR,,single positional indexer is out-of-bounds
+2026-03-15T22:36:37.274589,🟡 PAPER TRADING,MSFT,,,,,1024826.65,0.0,,,,ERROR,,single positional indexer is out-of-bounds
+2026-03-15T22:38:14.266784,🟡 PAPER TRADING,AAPL,,,,,1024826.65,0.0,,,,ERROR,,single positional indexer is out-of-bounds
+2026-03-15T22:38:14.311471,🟡 PAPER TRADING,MSFT,,,,,1024826.65,0.0,,,,ERROR,,single positional indexer is out-of-bounds
+2026-03-15T22:39:36.366553,🟡 PAPER TRADING,AAPL,,,,,1024826.65,0.0,,,,ERROR,,single positional indexer is out-of-bounds
+2026-03-15T22:39:36.420554,🟡 PAPER TRADING,MSFT,,,,,1024826.65,0.0,,,,ERROR,,single positional indexer is out-of-bounds
+2026-03-15T22:41:12.216011,🟡 PAPER TRADING,AAPL,,,,,1024826.65,0.0,,,,ERROR,,single positional indexer is out-of-bounds
+2026-03-15T22:41:12.259433,🟡 PAPER TRADING,MSFT,,,,,1024826.65,0.0,,,,ERROR,,single positional indexer is out-of-bounds
+2026-03-15T22:41:50.720864,🟡 PAPER TRADING,AAPL,,,,,1024826.65,0.0,,,,ERROR,,single positional indexer is out-of-bounds
+2026-03-15T22:41:50.761090,🟡 PAPER TRADING,MSFT,,,,,1024826.65,0.0,,,,ERROR,,single positional indexer is out-of-bounds
+2026-03-15T22:45:54.427140,🟡 PAPER TRADING,AAPL,NEUTRAL,250.12,,,1024826.65,0.0,0.5644,True,OK,NO_ACTION,,Status: loaded
+2026-03-15T22:45:54.476325,🟡 PAPER TRADING,MSFT,NEUTRAL,395.55,,,1024826.65,0.0,0.5644,True,OK,NO_ACTION,,Status: loaded
+2026-03-15T22:47:54.813258,🟡 PAPER TRADING,AAPL,NEUTRAL,250.12,,,1024826.65,0.0,0.5644,True,OK,NO_ACTION,,Status: loaded
+2026-03-15T22:47:54.856606,🟡 PAPER TRADING,MSFT,NEUTRAL,395.55,,,1024826.65,0.0,0.5644,True,OK,NO_ACTION,,Status: loaded

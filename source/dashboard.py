@@ -275,14 +275,16 @@ if not tickers:
 def _load_market_data(tickers_tuple: tuple, period: str):
     """Descarga y cachea datos de mercado durante 1 hora."""
     eng = FinanceEngine(list(tickers_tuple))
-    return eng.extract_data(period=period)
+    data_closes = eng.extract_data(period=period)
+    data_full = eng.extract_full_data(period=period)
+    return data_closes, data_full
 
 
 # Inicializar motor
 engine = FinanceEngine(tickers)
-data = _load_market_data(tuple(tickers), periodo)
+data, full_data = _load_market_data(tuple(tickers), periodo)
 
-if data is not None:
+if data is not None and full_data:
     # ASERCIÓN DE DATOS: Pasamos los datos del caché al motor interno
     engine.data = data 
     
@@ -436,28 +438,47 @@ if data is not None:
         st.subheader("Configuración del Modelo")
         target_ticker = st.selectbox("Activo a modelar:", tickers, key="ml_ticker")
         horizon = st.slider("Horizonte de Predicción (Días):", 1, 10, 5, help="Predice si el precio subirá o bajará de aquí a X días.")
-        model_type = st.radio("Algoritmo", ["XGBoost", "Random Forest"])
+        model_type = st.radio("Algoritmo", ["XGBoost", "Random Forest", "LightGBM", "CatBoost", "Ensemble"])
         comission = st.number_input("Comisión por Operación (%)", value=0.1, step=0.01) / 100.0
         
         run_backtest = st.button("🚀 Entrenar y Simular (VectorBT)", use_container_width=True)
 
     with col_bt:
         if run_backtest:
-            with st.spinner(f"1. Calculando Indicadores Técnicos y Targets para {target_ticker}..."):
-                # Inicializar el Engine de ML pasando la serie o el dataframe del activo
-                ml_sys = MLEngine(data[target_ticker])
-                
-                # Crear Feactures y Target
-                features, target = ml_sys.create_features_and_target(target_horizon=horizon)
+            with st.spinner(f"1. Calculando Indicadores Globales para todos los activos..."):
+                global_ml = MLEngine(full_data)
+                global_ml.create_features_and_target(target_horizon=horizon)
             
-            with st.spinner(f"2. Entrenando {model_type} (Time Series Split)..."):
-                # Entrenar modelo (WFO)
-                eval_results = ml_sys.train_and_evaluate(model_name=model_type, n_splits=5)
+            with st.spinner(f"2. Entrenando {model_type} Global (Time Series Split)..."):
+                if model_type == 'Ensemble':
+                    accs = []
+                    for m in ['XGBoost', 'LightGBM', 'CatBoost']:
+                        res = global_ml.train_and_evaluate(model_name=m, n_splits=5, ticker="GLOBAL")
+                        accs.append(res['accuracy'])
+                    eval_results = {'accuracy': np.mean(accs), 'report': res['report']}
+                else:
+                    eval_results = global_ml.train_and_evaluate(model_name=model_type, n_splits=5, ticker="GLOBAL")
                 
-                # Generar conjunto de señales de trading para toda la serie
+            with st.spinner(f"3. Generando señales para {target_ticker}..."):
+                ml_sys = MLEngine(full_data[target_ticker])
+                ml_sys.create_features_and_target(target_horizon=horizon, ticker_name=target_ticker)
+                
+                # Inyectar el modelo global
+                if model_type == 'Ensemble':
+                    for m in ['XGBoost', 'LightGBM', 'CatBoost']:
+                        ml_sys.trained_models[m] = global_ml.trained_models[m]
+                    if hasattr(global_ml, 'selected_features'):
+                        ml_sys.selected_features = global_ml.selected_features
+                else:
+                    ml_sys.trained_models[model_type] = global_ml.trained_models[model_type]
+                    if hasattr(global_ml, 'selected_features'):
+                        ml_sys.selected_features = global_ml.selected_features
+                    
+                ml_sys.selected_features_list = global_ml.selected_features_list
+                
                 signals = ml_sys.generate_signals(model_name=model_type)
 
-            with st.spinner("3. Ejecutando Backtester (Cálculo Vectorial)..."):
+            with st.spinner("4. Ejecutando Backtester (Cálculo Vectorial)..."):
                 # Ejecutar Backtest
                 bt = Backtester(ml_sys.df_processed['Close'], signals, comission_pct=comission)
                 metrics = bt.get_metrics()
@@ -662,7 +683,7 @@ with col_trading_1:
         options=tickers if data is not None else ["AAPL", "MSFT"],
         default=tickers[:2] if data is not None and len(tickers) >= 2 else []
     )
-    trading_model = st.radio("Modelo ML", ["XGBoost", "Random Forest"], horizontal=True)
+    trading_model = st.radio("Modelo ML", ["XGBoost", "Random Forest", "LightGBM", "CatBoost", "Ensemble"], horizontal=True)
     force_retrain = st.checkbox("🔄 Forzar Reentrenamiento (Ignorar modelos guardados)", value=False)
 
     # Mostrar resumen de guardarraíles activos

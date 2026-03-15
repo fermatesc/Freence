@@ -30,3 +30,5 @@ source/trading_journal*.csv
 
 # ─── Estado del Circuit Breaker ────────────────────────────────
 source/.circuit_state.json
+
+catboost_info/*

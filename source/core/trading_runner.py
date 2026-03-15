@@ -15,13 +15,18 @@ Para Live: LIVE_TRADING=true en el .env
 """
 
 import os
+import sys
 import csv
 import logging
 import requests
 import yfinance as yf
 import pandas as pd
+import numpy as np
 from datetime import datetime
 from dotenv import load_dotenv
+
+# Ensure the 'source' directory is in the Python path so it can be run from the root folder
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.finance_ingestor import FinanceEngine
 from ml.ml_engine import MLEngine
@@ -86,25 +91,15 @@ def _append_to_journal(record: dict):
         writer.writerow(record)
 
 
-def _get_current_price(ticker: str) -> float:
-    """Obtiene el último precio de cierre disponible."""
-    try:
-        data = yf.download(ticker, period='2d', progress=False)['Close']
-        return float(data.iloc[-1]) if not data.empty else 0.0
-    except Exception:
-        return 0.0
-
-
 # ─────────────────────────────────────────────
 # Pipeline Principal
 # ─────────────────────────────────────────────
 
 def run_trading_session(
     tickers: list,
-    model_type: str = "XGBoost",
+    model_type: str = "AUTO",
     target_horizon: int = 5,
-    n_wfo_splits: int = 5,
-    force_retrain: bool = False
+    n_wfo_splits: int = 5
 ) -> dict:
     """
     Ejecuta una sesión completa de trading para la lista de activos.
@@ -147,15 +142,18 @@ def run_trading_session(
 
     # --- PASO 3: Cargar datos históricos ---
     engine = FinanceEngine(tickers)
-    data = engine.extract_data(period="10y")
+    full_data = engine.extract_full_data(period="10y")
 
-    if data is None or data.empty:
+    if not full_data:
         broker.disconnect()
         return {'status': 'error', 'msg': 'No se pudieron cargar datos históricos.'}
 
+    # No entrenamos Modelo Global aquí. Runners strictly use pre-trained models.
+    log.info("\n--- El Trading Runner usará los modelos entrenados en background ---")
+
     results_by_ticker = {}
 
-    # --- PASO 4: Analizar cada activo ---
+    # --- PASO 4: Analizar cada activo usando el Modelo Global ---
     for ticker in tickers:
         log.info(f"\n--- Analizando {ticker} ---")
         record = {
@@ -167,25 +165,66 @@ def run_trading_session(
         }
 
         try:
-            # 4a. Carga o Entrenamiento Inteligente (Fase 6)
-            ml = MLEngine(data[ticker])
-            ml.create_features_and_target(target_horizon=target_horizon)
+            # Para evaluar el activo, extraemos sus features localmente
+            if ticker not in full_data:
+                log.warning(f"  Saltando {ticker}: Sin datos suficientes.")
+                continue
+            ml = MLEngine(full_data[ticker])
+            ml.create_features_and_target(target_horizon=target_horizon, ticker_name=ticker)
             
-            # Usamos load_or_train para evitar reentrenar sin motivo
-            training_res = ml.load_or_train(ticker, model_name=model_type, force_retrain=force_retrain)
+            # Selección de Modelo (Local fallback Global)
+            selected_model_name = model_type
+            model_accuracy = 0.0
+            model_status = "loaded"
             
-            model_accuracy = training_res['accuracy']
-            model_status = training_res.get('status', 'unknown')
-            
-            signals = ml.generate_signals(model_name=model_type)
+            if model_type == 'AUTO':
+                best_acc = 0.0
+                best_mod = None
+                for m in ['XGBoost', 'LightGBM', 'CatBoost', 'Random Forest']:
+                    meta = ml.load_persistence(ticker, m)
+                    if meta and float(meta.get('accuracy', 0)) > float(best_acc):
+                        best_acc = float(meta['accuracy'])
+                        best_mod = m
+                
+                # Si no hay local, buscar global
+                if not best_mod:
+                    log.warning(f"No hay modelo local para {ticker}, buscando globales...")
+                    for m in ['XGBoost', 'LightGBM', 'CatBoost', 'Random Forest']:
+                         meta = ml.load_persistence("GLOBAL", m)
+                         if meta and float(meta.get('accuracy', 0)) > float(best_acc):
+                             best_acc = float(meta['accuracy'])
+                             best_mod = m
+                             # Copiar al scope local para uso
+                             ml.trained_models[m] = ml.trained_models.get(m) # Ya cargado por load_persistence bajo "GLOBAL" key si existe
+                
+                if not best_mod:
+                     log.error(f"No hay modelo para operar en {ticker}.")
+                     continue
+                
+                selected_model_name = best_mod
+                model_accuracy = best_acc
+                
+            else:
+                # Carga modelo especifico forzado
+                meta = ml.load_persistence(ticker, selected_model_name)
+                if not meta:
+                    meta = ml.load_persistence("GLOBAL", selected_model_name)
+                if meta:
+                    model_accuracy = float(meta.get('accuracy', 0))
+                else:
+                    log.error(f"Modelo forzado {selected_model_name} no existe para {ticker}.")
+                    continue
+
+            # Generar señales
+            signals = ml.generate_signals(model_name=selected_model_name)
             latest_signal = int(signals.iloc[-1])  # 1=BUY, 0=SELL/NEUTRAL
 
             signal_str = "BUY" if latest_signal == 1 else "NEUTRAL"
-            log.info(f"  Modelo: {model_status.upper()} | Señal: {signal_str} | AccWFO: {model_accuracy:.2%}")
+            log.info(f"  Modelo seleccionado: {selected_model_name} | Señal para {ticker}: {signal_str}")
 
             record['signal'] = signal_str
             record['model_accuracy'] = f"{model_accuracy:.4f}"
-            record['notes'] = f"Status: {model_status}"
+            record['notes'] = f"Model: {selected_model_name}"
 
             # 4b. Validación de riesgo
             risk_ok, risk_reason = risk.validate_trade(
@@ -207,14 +246,14 @@ def run_trading_session(
                 continue
 
             # 4c. Decidir acción
-            current_price = _get_current_price(ticker)
+            current_price = float(full_data[ticker]['Close'].iloc[-1])
             record['price'] = f"{current_price:.2f}"
 
             in_position = any(p['ticker'] == ticker and p['qty'] > 0 for p in open_positions)
 
             if latest_signal == 1 and not in_position:
                 # BUY: calcular tamaño y colocar orden
-                qty = risk.calculate_position_size(capital, current_price)
+                qty = risk.calculate_position_size(capital, current_price, model_accuracy=model_accuracy)
                 if qty == 0:
                     record['order_status'] = 'SKIPPED'
                     record['notes'] = 'Tamaño de posición = 0 (capital insuficiente para el precio)'
@@ -242,7 +281,7 @@ def run_trading_session(
                 results_by_ticker[ticker] = {'signal': signal_str, 'action': 'NO_ACTION', 'accuracy': model_accuracy}
 
         except Exception as e:
-            log.error(f"Error procesando {ticker}: {e}")
+            log.error(f"Error procesando {ticker}: {e}", exc_info=True)
             record['order_status'] = 'ERROR'
             record['notes'] = str(e)
             results_by_ticker[ticker] = {'status': 'error', 'msg': str(e)}

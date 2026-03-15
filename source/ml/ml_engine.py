@@ -10,8 +10,9 @@ import asyncio
 from datetime import datetime, timedelta
 from xgboost import XGBClassifier
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
+from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV, GridSearchCV
 from sklearn.metrics import accuracy_score, classification_report
+
 from sklearn.feature_selection import SelectFromModel
 
 log = logging.getLogger(__name__)
@@ -26,47 +27,54 @@ class MLEngine:
     
     MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
 
-    def __init__(self, df: pd.DataFrame = None):
+    def __init__(self, data=None):
         """
         Inicializa el motor. 
-        df es opcional si solo se va a cargar un modelo existente.
+        `data` puede ser:
+        - None (solo para cargar modelo existente)
+        - pd.DataFrame (solo para un activo)
+        - Dict[str, pd.DataFrame] (para múltiples activos, modelo global)
         """
-        if df is not None:
-            if isinstance(df, pd.Series):
-                self.df = df.to_frame(name='Close')
+        self.df = None
+        self.multi_df = None
+        
+        if data is not None:
+            if isinstance(data, dict):
+                self.multi_df = {k: self._format_df(v) for k, v in data.items()}
             else:
-                self.df = df.copy()
-                if 'Close' not in self.df.columns and 'Adj Close' in self.df.columns:
-                     self.df.rename(columns={'Adj Close': 'Close'}, inplace=True)
-                elif len(self.df.columns) == 1:
-                    self.df.columns = ['Close']
-        else:
-            self.df = None
+                self.df = self._format_df(data)
 
         self.features = None
         self.target = None
         self.trained_models = {}
+        self.selected_features = {}
         
         if not os.path.exists(self.MODELS_DIR):
             os.makedirs(self.MODELS_DIR, exist_ok=True)
 
-    def create_features_and_target(self, target_horizon: int = 5):
-        """
-        Genera un set robusto de indicadores técnicos.
-        """
-        if self.df is None:
-            raise ValueError("No hay datos cargados para generar features.")
-            
-        df = self.df.copy()
+    def _format_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        if isinstance(df, pd.Series):
+            return df.to_frame(name='Close')
+        df_copy = df.copy()
+        if 'Close' not in df_copy.columns and 'Adj Close' in df_copy.columns:
+             df_copy.rename(columns={'Adj Close': 'Close'}, inplace=True)
+        elif len(df_copy.columns) == 1:
+            df_copy.columns = ['Close']
+        return df_copy
+        
+    def _compute_features_for_df(self, df: pd.DataFrame, target_horizon: int, ticker_name: str) -> pd.DataFrame:
+        """Genera indicadores puramente relativos (porcentuales) para un único DataFrame."""
+        df = df.copy()
 
         # --- 1. INDICADORES BÁSICOS (TA) ---
         df['RSI'] = ta.momentum.RSIIndicator(close=df['Close'], window=14).rsi()
         macd = ta.trend.MACD(close=df['Close'], window_slow=26, window_fast=12, window_sign=9)
-        df['MACD'] = macd.macd()
-        df['MACD_Signal'] = macd.macd_signal()
+        # MACD es absoluto, lo convertiremos a porcentaje del precio
+        df['MACD_Pct'] = macd.macd() / df['Close']
+        df['MACD_Signal_Pct'] = macd.macd_signal() / df['Close']
+        df['MACD_Hist_Pct'] = macd.macd_diff() / df['Close']
         
         # --- 2. VOLATILIDAD AVANZADA ---
-        # Bandas de Bollinger
         bb = ta.volatility.BollingerBands(close=df['Close'], window=20, window_dev=2)
         df['BB_High_Dist'] = (bb.bollinger_hband() - df['Close']) / df['Close']
         df['BB_Low_Dist'] = (df['Close'] - bb.bollinger_lband()) / df['Close']
@@ -74,24 +82,25 @@ class MLEngine:
         
         # ATR (Average True Range) - Usamos una estimación si no hay High/Low
         if 'High' in df.columns and 'Low' in df.columns:
-            df['ATR'] = ta.volatility.AverageTrueRange(high=df['High'], low=df['Low'], close=df['Close'], window=14).average_true_range()
+            atr = ta.volatility.AverageTrueRange(high=df['High'], low=df['Low'], close=df['Close'], window=14).average_true_range()
         else:
-            df['ATR'] = df['Close'].rolling(window=14).std()
-        df['ATR_Pct'] = df['ATR'] / df['Close']
+            atr = df['Close'].rolling(window=14).std()
+        df['ATR_Pct'] = atr / df['Close']
         
         # --- 3. VOLUMEN (Si existe) ---
         if 'Volume' in df.columns:
-            df['OBV'] = ta.volume.OnBalanceVolumeIndicator(close=df['Close'], volume=df['Volume']).on_balance_volume()
-            df['OBV_ROC'] = df['OBV'].pct_change(5)
+            obv = ta.volume.OnBalanceVolumeIndicator(close=df['Close'], volume=df['Volume']).on_balance_volume()
+            # Smooth OBV para pct_change evitando divisiones por cero ruidosas
+            df['OBV_ROC'] = obv.rolling(5).mean().pct_change(5)
             
         # --- 4. TENDENCIA Y MOMENTUM ---
-        df['SMA_20'] = ta.trend.SMAIndicator(close=df['Close'], window=20).sma_indicator()
-        df['SMA_50'] = ta.trend.SMAIndicator(close=df['Close'], window=50).sma_indicator()
-        df['SMA_200'] = ta.trend.SMAIndicator(close=df['Close'], window=200).sma_indicator()
+        sma_20 = ta.trend.SMAIndicator(close=df['Close'], window=20).sma_indicator()
+        sma_50 = ta.trend.SMAIndicator(close=df['Close'], window=50).sma_indicator()
+        sma_200 = ta.trend.SMAIndicator(close=df['Close'], window=200).sma_indicator()
         
-        df['Dist_SMA_20'] = (df['Close'] - df['SMA_20']) / df['SMA_20']
-        df['Dist_SMA_50'] = (df['Close'] - df['SMA_50']) / df['SMA_50']
-        df['Dist_SMA_200'] = (df['Close'] - df['SMA_200']) / df['SMA_200']
+        df['Dist_SMA_20'] = (df['Close'] - sma_20) / sma_20
+        df['Dist_SMA_50'] = (df['Close'] - sma_50) / sma_50
+        df['Dist_SMA_200'] = (df['Close'] - sma_200) / sma_200
 
         # Retornos pasados
         for lag in [1, 2, 3, 5, 10]:
@@ -100,22 +109,58 @@ class MLEngine:
         # Calendario
         df['DayOfWeek'] = df.index.dayofweek
         df['Month'] = df.index.month
+        
+        # Ticker Categórico (Deterministic Hash)
+        # Esto evita problemas de discrepancia de categorías entre train y predict
+        df['Ticker_Code'] = int(hashlib.md5(ticker_name.encode()).hexdigest(), 16) % 10000
+
+        # --- 6. MACRO Y CROSS-SECTIONAL ---
+        if 'SPY_Close' in df.columns:
+            spy_ret = df['SPY_Close'].pct_change(5)
+            asset_ret = df['Close'].pct_change(5)
+            df['Relative_Strength_5d'] = asset_ret - spy_ret
+            
+        if 'VIX_Close' in df.columns:
+            # VIX ya es un % (Volatilidad Implícita), por lo que es comparable cross-asset
+            df['VIX_Level'] = df['VIX_Close']
+            df['VIX_Change_5d'] = df['VIX_Close'].pct_change(5)
 
         # --- 5. TARGET DINÁMICO (Basado en Volatilidad - ATR) ---
         # Subimos la valla a 0.75 * ATR para ser más selectivos y buscar señales claras.
         target_mult = 0.75 
-        df['Target_Threshold'] = df['ATR'] * target_mult / df['Close']
+        df['Target_Threshold'] = atr * target_mult / df['Close']
         df[f'Fut_Ret_{target_horizon}'] = df['Close'].pct_change(target_horizon).shift(-target_horizon)
         
         # Clase 1 si el retorno supera la "valla" de volatilidad
         df['Target'] = (df[f'Fut_Ret_{target_horizon}'] > df['Target_Threshold']).astype(int)
 
         df.dropna(inplace=True)
+        return df
 
-        features_cols = sorted([c for c in df.columns if c not in ['Target', f'Fut_Ret_{target_horizon}', 'Close', 'High', 'Low', 'Volume', 'Adj Close', 'OBV', 'Target_Threshold']])
-        self.features = df[features_cols]
-        self.target = df['Target']
-        self.df_processed = df
+    def create_features_and_target(self, target_horizon: int = 5, ticker_name: str = "UNKNOWN"):
+        """Genera características estandarizadas para modelo global o individual."""
+        if self.df is None and self.multi_df is None:
+            raise ValueError("No hay datos cargados para generar features.")
+
+        dfs_to_concat = []
+        if self.multi_df is not None:
+            for ticker, df in self.multi_df.items():
+                processed_df = self._compute_features_for_df(df, target_horizon, ticker)
+                dfs_to_concat.append(processed_df)
+        else:
+            processed_df = self._compute_features_for_df(self.df, target_horizon, ticker_name)
+            dfs_to_concat.append(processed_df)
+            
+        final_df = pd.concat(dfs_to_concat)
+        
+        # Filtramos variables absolutas que romperían la generalización cross-asset
+        drop_cols = ['Target', f'Fut_Ret_{target_horizon}', 'Close', 'High', 'Low', 'Volume', 'Adj Close', 'Target_Threshold']
+        
+        features_cols = sorted([c for c in final_df.columns if c not in drop_cols])
+        
+        self.features = final_df[features_cols]
+        self.target = final_df['Target']
+        self.df_processed = final_df # Usado por el Backtester
 
         return self.features, self.target
 
@@ -199,15 +244,16 @@ class MLEngine:
                     log.warning(f"Modelo legacy detectado para {ticker}. Reentrenamiento recomendado.")
                     self.selected_features_list = None
                 else:
-                    self.selected_features_list = sorted(saved_features)
+                    self.selected_features[model_name] = sorted(saved_features)
+                    self.selected_features_list = sorted(saved_features) # fallback for retrocompatibility
                 return meta
             except Exception as e:
                 log.error(f"Error cargando persistencia de {ticker}: {e}", exc_info=True)
         return None
 
-    def train_and_evaluate(self, model_name: str = 'XGBoost', n_splits: int = 5, ticker: str = "UNKNOWN"):
+    def train_and_evaluate(self, model_name: str = 'XGBoost', n_splits: int = 5, ticker: str = "UNKNOWN", search_type: str = 'random'):
         """
-        Entrena el modelo con búsqueda de hiperparámetros (RandomizedSearch) 
+        Entrena el modelo con búsqueda de hiperparámetros (RandomizedSearch o GridSearchCV) 
         y selección de características.
         """
         if self.features is None or self.target is None:
@@ -216,7 +262,6 @@ class MLEngine:
         # 1. Búsqueda de Hiperparámetros (RandomizedSearch)
         # Solo lo hacemos si es un entrenamiento nuevo o necesario
         if model_name == 'XGBoost':
-            # Calcular balance de clases para scale_pos_weight
             pos_ratio = (self.target == 0).sum() / (self.target == 1).sum() if (self.target == 1).sum() > 0 else 1
             
             base_model = XGBClassifier(random_state=42, eval_metric='logloss', scale_pos_weight=pos_ratio)
@@ -227,6 +272,25 @@ class MLEngine:
                 'subsample': [0.6, 0.8, 1.0],
                 'colsample_bytree': [0.6, 0.8, 1.0],
                 'gamma': [0, 0.1, 0.2]
+            }
+        elif model_name == 'LightGBM':
+            from lightgbm import LGBMClassifier
+            pos_ratio = (self.target == 0).sum() / (self.target == 1).sum() if (self.target == 1).sum() > 0 else 1
+            base_model = LGBMClassifier(random_state=42, scale_pos_weight=pos_ratio, verbose=-1)
+            param_grid = {
+                'n_estimators': [100, 200, 300],
+                'max_depth': [-1, 5, 8],
+                'learning_rate': [0.01, 0.05, 0.1],
+                'num_leaves': [31, 50]
+            }
+        elif model_name == 'CatBoost':
+            from catboost import CatBoostClassifier
+            pos_ratio = (self.target == 0).sum() / (self.target == 1).sum() if (self.target == 1).sum() > 0 else 1
+            base_model = CatBoostClassifier(random_state=42, scale_pos_weight=pos_ratio, verbose=0, allow_writing_files=False)
+            param_grid = {
+                'iterations': [100, 200, 300],
+                'depth': [4, 6, 8],
+                'learning_rate': [0.01, 0.05, 0.1]
             }
         else:
             base_model = RandomForestClassifier(random_state=42)
@@ -250,11 +314,18 @@ class MLEngine:
                 weights[i] = max(0.5, 1.0 - (dist_from_now - decay_period) / (n_samples * 2))
         
         tscv = TimeSeriesSplit(n_splits=n_splits)
-        # Realizamos una búsqueda ligera (n_iter=10) para no relentizar demasiado
-        search = RandomizedSearchCV(
-            base_model, param_distributions=param_grid, 
-            n_iter=10, cv=tscv, scoring='accuracy', n_jobs=-1, random_state=42
-        )
+        
+        if search_type == 'grid':
+            search = GridSearchCV(
+                base_model, param_grid=param_grid, 
+                cv=tscv, scoring='accuracy', n_jobs=-1
+            )
+        else:
+            # Realizamos una búsqueda ligera (n_iter=10) para no relentizar demasiado
+            search = RandomizedSearchCV(
+                base_model, param_distributions=param_grid, 
+                n_iter=10, cv=tscv, scoring='accuracy', n_jobs=-1, random_state=42
+            )
         
         # Pasar pesos al fit de la búsqueda
         search.fit(self.features, self.target, sample_weight=weights)
@@ -268,7 +339,8 @@ class MLEngine:
         log.info(f"Features seleccionadas para {ticker}: {len(selected_features)}/{len(self.features.columns)}")
         
         # Guardamos la lista de features para futuras predicciones
-        self.selected_features_list = selected_features
+        self.selected_features[model_name] = selected_features
+        self.selected_features_list = selected_features # Fallback/Retrocompatibilidad
         X_reduced = self.features[selected_features]
 
         # 3. Evaluación Final (WFO) sobre features reducidas
@@ -336,20 +408,67 @@ class MLEngine:
         res = self.train_and_evaluate(model_name, ticker=ticker)
         return {**res, 'status': 'new'}
 
+    def fine_tune(self, model_name: str, ticker: str, X_new: pd.DataFrame, y_new: pd.Series, error_weight: float = 2.0):
+        """
+        Realiza un fine-tuning rápido al modelo existente, dándole mayor peso a X_new.
+        """
+        meta = self.load_persistence(ticker, model_name)
+        if not meta or model_name not in self.trained_models:
+            log.warning(f"No hay modelo previo para hacer fine-tuning a {ticker}")
+            return False
+
+        model = self.trained_models[model_name]
+        
+        features_to_use = self.selected_features.get(model_name, getattr(self, 'selected_features_list', X_new.columns.tolist()))
+        features_to_use = [f for f in features_to_use if f in X_new.columns]
+        X_reduced = X_new[features_to_use]
+        weights = np.ones(len(y_new)) * error_weight
+        
+        try:
+            log.info(f"Iniciando fine-tuning de {model_name} para {ticker} con {len(X_reduced)} muestras de refuerzo...")
+            if model_name == 'XGBoost':
+                model.fit(X_reduced, y_new, sample_weight=weights, xgb_model=model.get_booster())
+            elif model_name == 'LightGBM':
+                model.fit(X_reduced, y_new, sample_weight=weights, init_model=model)
+            elif model_name == 'CatBoost':
+                model.fit(X_reduced, y_new, sample_weight=weights, init_model=model)
+            else:
+                model.set_params(warm_start=True, n_estimators=model.n_estimators + 5)
+                model.fit(X_reduced, y_new, sample_weight=weights)
+                
+            self.save_persistence(ticker, model_name, meta['accuracy'], metadata=meta.get('extra', {}))
+            log.info(f"✅ Fine-tuning exitoso para {model_name} en {ticker}")
+            return True
+        except Exception as e:
+            log.error(f"❌ Error durante el fine-tuning de {model_name} para {ticker}: {e}")
+            return False
+
     def generate_signals(self, model_name: str = 'XGBoost'):
         """Genera señales usando las features seleccionadas."""
-        if model_name not in self.trained_models:
-             raise ValueError("Modelo no cargado/entrenado.")
-        
-        # Obtener las features que el modelo espera
-        # Si no hay lista (modelo legacy), usamos todas las actuales (esto fallará si cambiaron, lo cual es correcto)
-        features_to_use = getattr(self, 'selected_features_list', None)
-        if features_to_use is None:
-            features_to_use = self.features.columns.tolist()
-        
-        # Asegurar orden consistente
-        features_to_use = sorted(features_to_use)
-        
-        X_pred = self.features[features_to_use]
-        return pd.Series(self.trained_models[model_name].predict(X_pred), 
-                         index=self.features.index, name='Signal')
+        if model_name == 'Ensemble':
+            req_models = ['XGBoost', 'LightGBM', 'CatBoost']
+            missing = [m for m in req_models if m not in self.trained_models]
+            if missing:
+                raise ValueError(f"Para usar Ensemble deben entrenarse: {missing}")
+            
+            probs = np.zeros(len(self.features))
+            for m in req_models:
+                features_to_use = self.selected_features.get(m, self.features.columns.tolist())
+                features_to_use = sorted(features_to_use)
+                X_pred = self.features[features_to_use]
+                probs += self.trained_models[m].predict_proba(X_pred)[:, 1]
+            
+            avg_probs = probs / len(req_models)
+            # Meta-modelo simple: Votación suave
+            final_signals = (avg_probs > 0.5).astype(int)
+            return pd.Series(final_signals, index=self.features.index, name='Signal')
+        else:
+            if model_name not in self.trained_models:
+                 raise ValueError("Modelo no cargado/entrenado.")
+            
+            features_to_use = self.selected_features.get(model_name, getattr(self, 'selected_features_list', self.features.columns.tolist()))
+            features_to_use = sorted(features_to_use)
+            X_pred = self.features[features_to_use]
+            
+            return pd.Series(self.trained_models[model_name].predict(X_pred), 
+                             index=self.features.index, name='Signal')

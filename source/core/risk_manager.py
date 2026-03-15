@@ -86,24 +86,34 @@ class RiskManager:
         log.info(f"✅ Trade APROBADO [{ticker}] — Todos los guardarraíles superados.")
         return True, "OK"
 
-    def calculate_position_size(self, capital: float, price: float) -> int:
+    def calculate_position_size(self, capital: float, price: float, model_accuracy: float = None, win_loss_ratio: float = 1.5) -> int:
         """
-        Fixed Fractional Position Sizing:
-        Nº de acciones = (Capital * Riesgo_max) / (Precio * Stop_Loss_pct)
-
-        Con €300, 2% de riesgo y stop de 3%: apenas 6€ de riesgo → ~2 acciones si precio = €100.
+        Kelly Criterion / Fixed Fractional Position Sizing:
+        Calcula el tamaño de la posición basándose en el nivel de certidumbre del modelo (Kelly)
+        amortiguado de forma conservadora (Half-Kelly).
         
-        Returns:
-            Nº entero de acciones a comprar (mínimo 1 si puede operar, 0 si no)
+        Nº de acciones = (Capital * Riesgo_Dinámico) / (Precio * Stop_Loss_pct)
         """
         if price <= 0 or capital < self.min_capital:
             return 0
 
-        risk_amount = capital * self.max_risk_pct          # €: cuánto arriesgo máximo
-        shares = risk_amount / (price * self.stop_loss_pct)  # Acciones basadas en el stop
+        # Fractional Kelly (Half-Kelly)
+        if model_accuracy is not None and model_accuracy > 0.5:
+            # Fómula de Kelly: W - [(1-W)/R]
+            kelly_f = model_accuracy - ((1 - model_accuracy) / win_loss_ratio)
+            half_kelly = max(0.01, kelly_f / 2)
+            
+            # Restringido por el riesgo máximo fijo de seguridad
+            dynamic_risk_pct = min(self.max_risk_pct, half_kelly)
+            log.info(f"🧠 Asignación Cuantitativa: Kelly_F={kelly_f:.2%}, Half={half_kelly:.2%}, Aplicado={dynamic_risk_pct:.2%}")
+        else:
+            dynamic_risk_pct = self.max_risk_pct
+
+        risk_amount = capital * dynamic_risk_pct
+        shares = risk_amount / (price * self.stop_loss_pct)
         shares_int = max(1, int(shares))
 
-        # Verificar que la posición no supera más del 40% del capital (diversificación)
+        # Rebalanceo: Diversificar para no superar más del 40% del capital real total en 1 activo
         max_position_value = capital * 0.40
         if shares_int * price > max_position_value:
             shares_int = max(1, int(max_position_value / price))
